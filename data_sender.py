@@ -1,9 +1,15 @@
 import asyncio
 import json  # WARNING: Slow for 200Hz, consider a binary format.
-import socket  # Only used for AsyncUDPSender structure, not for direct sending.
+# socket import is not strictly needed here anymore as AsyncUDPSender handles its needs.
 
-from pupil_labs.realtime_api.simple import discover_one_device
 from pupil_labs.real_time_screen_gaze.gaze_mapper import GazeMapper
+# Use asynchronous components
+from pupil_labs.realtime_api.discovery import Network
+from pupil_labs.realtime_api.device import Device
+from pupil_labs.realtime_api.streaming.gaze import RTSPGazeStreamer
+from pupil_labs.realtime_api.streaming.video import RTSPVideoFrameStreamer
+from pupil_labs.realtime_api.streaming.
+from pupil_labs.realtime_api import models # For Status, GazeData, VideoFrame if type hinting
 
 # --- Configuration ---
 UNITY_IP = "127.0.0.1"  # IP address
@@ -14,12 +20,8 @@ SCREEN_WIDTH_PX = 1920
 SCREEN_HEIGHT_PX = 1080
 screen_surface_size_px = (SCREEN_WIDTH_PX, SCREEN_HEIGHT_PX)
 
-# AprilTag marker configuration on the screen
-#  4 tuples (x, y) representing the marker corners in pixels on the screen.
-# Example: a square marker of 80px, with ID 0, placed 50,50px from the top left corner of the screen.
-# (top_left, top_right, bottom_right, bottom_left)
-MARKER_DISPLAY_SIZE_PX = 80  # Display size of your markers on the screen
-PADDING_PX = 50  # Margin from the edges of the screen
+MARKER_DISPLAY_SIZE_PX = 80
+PADDING_PX = 50
 
 marker_verts_screen_px = {
     0: [
@@ -57,8 +59,6 @@ class AsyncUDPSender:
 
     async def connect(self):
         loop = asyncio.get_running_loop()
-        # For sendto only, no need for a complex protocol class.
-        # remote_addr specifies the default destination for sendto().
         self.transport, _ = await loop.create_datagram_endpoint(
             lambda: asyncio.DatagramProtocol(),
             remote_addr=(self.host, self.port)
@@ -70,7 +70,6 @@ class AsyncUDPSender:
             print("Error: UDP transport not initialized. Call connect() first.")
             return
         try:
-            # WARNING: JSON is slow. For 200Hz, use a binary format.
             message = json.dumps(data_dict).encode('utf-8')
             self.transport.sendto(message)
         except Exception as e:
@@ -82,91 +81,91 @@ class AsyncUDPSender:
             print("UDP Sender connection closed.")
 
 
-async def stream_data_loop(device, gaze_mapper, surface_definition, udp_sender: AsyncUDPSender):
-    """Main loop to retrieve, process, and send data."""
-    print("Starting data streaming...")
-    async for frame, gaze in device.async_receive_matched_scene_video_frame_and_gaze():
-        if frame is None or gaze is None:
-            # Can happen if packets are missed or matching fails.
-            # print("Missing frame or gaze data.") # Can be verbose
-            continue
+async def stream_data_from_matcher(matcher: DataMatcher, gaze_mapper: GazeMapper, surface_definition, udp_sender: AsyncUDPSender):
+    """Main loop to retrieve, process, and send data using DataMatcher."""
+    print("Starting data streaming with matcher...")
+    async with matcher: # Use matcher as an async context manager
+        async for item in matcher.receive(): # item is MatchedItem(gaze, frame)
+            gaze: models.GazeData = item.gaze
+            frame: models.VideoFrame = item.frame
 
-        # 1. Process with GazeMapper to get surface data
-        # `gaze` is a pupil_labs.realtime_api.models.GazeData object
-        # `frame` is a pupil_labs.realtime_api.models.VideoFrame object
-        surface_gaze_result = gaze_mapper.process_frame(frame, gaze)
+            if frame is None or gaze is None:
+                continue
 
-        # 2. Prepare raw gaze data
-        # The `gaze` object already contains detailed information.
-        raw_gaze_data_to_send = {
-            "timestamp_unix_seconds": gaze.timestamp_unix_seconds,
-            "x_raw_normalized": gaze.x,  # Normalized coordinates in scene camera space
-            "y_raw_normalized": gaze.y,
-            "worn": gaze.worn,
-            "pupil_diameter_left": gaze.pupil_diameter_left,
-            "eyeball_center_left_x": gaze.eyeball_center_left_x,
-            "eyeball_center_left_y": gaze.eyeball_center_left_y,
-            "eyeball_center_left_z": gaze.eyeball_center_left_z,
-            "optical_axis_left_x": gaze.optical_axis_left_x,
-            "optical_axis_left_y": gaze.optical_axis_left_y,
-            "optical_axis_left_z": gaze.optical_axis_left_z,
-            "pupil_diameter_right": gaze.pupil_diameter_right,
-            "eyeball_center_right_x": gaze.eyeball_center_right_x,
-            "eyeball_center_right_y": gaze.eyeball_center_right_y,
-            "eyeball_center_right_z": gaze.eyeball_center_right_z,
-            "optical_axis_right_x": gaze.optical_axis_right_x,
-            "optical_axis_right_y": gaze.optical_axis_right_y,
-            "optical_axis_right_z": gaze.optical_axis_right_z,
-            "eyelid_angle_top_left": getattr(gaze, 'eyelid_angle_top_left', None),  # Newer attributes
-            "eyelid_angle_bottom_left": getattr(gaze, 'eyelid_angle_bottom_left', None),
-            "eyelid_aperture_left": getattr(gaze, 'eyelid_aperture_left', None),
-            "eyelid_angle_top_right": getattr(gaze, 'eyelid_angle_top_right', None),
-            "eyelid_angle_bottom_right": getattr(gaze, 'eyelid_angle_bottom_right', None),
-            "eyelid_aperture_right": getattr(gaze, 'eyelid_aperture_right', None),
-        }
+            surface_gaze_result = gaze_mapper.process_frame(frame, gaze)
 
-        # 3. Prepare surface gaze data
-        surface_gaze_list_to_send = []
-        if surface_definition.uid in surface_gaze_result.mapped_gaze:
-            for surf_gaze_item in surface_gaze_result.mapped_gaze[surface_definition.uid]:
-                surface_gaze_list_to_send.append({
-                    "timestamp_unix_seconds": surf_gaze_item.timestamp_unix_seconds,
-                    "x_surface_px": surf_gaze_item.x,  # Pixel coordinates on the defined surface
-                    "y_surface_px": surf_gaze_item.y,
-                    "on_surf": surf_gaze_item.on_surf,
-                    "confidence": surf_gaze_item.confidence,
-                })
+            raw_gaze_data_to_send = {
+                "timestamp_unix_seconds": gaze.timestamp_unix_seconds,
+                "x_raw_normalized": gaze.x,
+                "y_raw_normalized": gaze.y,
+                "worn": gaze.worn,
+                "pupil_diameter_left": gaze.pupil_diameter_left,
+                "eyeball_center_left_x": gaze.eyeball_center_left_x,
+                "eyeball_center_left_y": gaze.eyeball_center_left_y,
+                "eyeball_center_left_z": gaze.eyeball_center_left_z,
+                "optical_axis_left_x": gaze.optical_axis_left_x,
+                "optical_axis_left_y": gaze.optical_axis_left_y,
+                "optical_axis_left_z": gaze.optical_axis_left_z,
+                "pupil_diameter_right": gaze.pupil_diameter_right,
+                "eyeball_center_right_x": gaze.eyeball_center_right_x,
+                "eyeball_center_right_y": gaze.eyeball_center_right_y,
+                "eyeball_center_right_z": gaze.eyeball_center_right_z,
+                "optical_axis_right_x": gaze.optical_axis_right_x,
+                "optical_axis_right_y": gaze.optical_axis_right_y,
+                "optical_axis_right_z": gaze.optical_axis_right_z,
+                "eyelid_angle_top_left": getattr(gaze, 'eyelid_angle_top_left', None),
+                "eyelid_angle_bottom_left": getattr(gaze, 'eyelid_angle_bottom_left', None),
+                "eyelid_aperture_left": getattr(gaze, 'eyelid_aperture_left', None),
+                "eyelid_angle_top_right": getattr(gaze, 'eyelid_angle_top_right', None),
+                "eyelid_angle_bottom_right": getattr(gaze, 'eyelid_angle_bottom_right', None),
+                "eyelid_aperture_right": getattr(gaze, 'eyelid_aperture_right', None),
+            }
 
-        # 4. Combine and send data
-        data_payload = {
-            "raw_gaze_data": raw_gaze_data_to_send,
-            "surface_gaze_data": surface_gaze_list_to_send  # Usually a list with a single element
-        }
-        udp_sender.send_data(data_payload)
-        # print(f"Data sent at {gaze.timestamp_unix_seconds:.3f}") # For debugging
+            surface_gaze_list_to_send = []
+            if surface_definition.uid in surface_gaze_result.mapped_gaze:
+                for surf_gaze_item in surface_gaze_result.mapped_gaze[surface_definition.uid]:
+                    surface_gaze_list_to_send.append({
+                        "timestamp_unix_seconds": surf_gaze_item.timestamp_unix_seconds,
+                        "x_surface_px": surf_gaze_item.x,
+                        "y_surface_px": surf_gaze_item.y,
+                        "on_surf": surf_gaze_item.on_surf,
+                        "confidence": surf_gaze_item.confidence,
+                    })
+
+            data_payload = {
+                "raw_gaze_data": raw_gaze_data_to_send,
+                "surface_gaze_data": surface_gaze_list_to_send
+            }
+            udp_sender.send_data(data_payload)
 
 async def run_main_application():
     """Main function to initialize and start the streaming loop."""
-    device = None
+    network = Network()
+    async_pl_device = None
     udp_sender = None
 
     try:
-        print("Searching for a Pupil Labs device...")
-        # discover_one_device is synchronous
-        device = discover_one_device(max_search_duration_seconds=10)
-        if device is None:
+        print("Searching for a Pupil Labs device (async)...")
+        device_info = await network.wait_for_new_device(timeout_seconds=10)
+       
+        if device_info is None:
             print("No Pupil Labs device found.")
             return
-        print(f"Connected to: {device.phone_name} ({device.dns_name})")
+        # device_info is DiscoveredDeviceInfo, has .name, .address, .port
+        print(f"Device info found: {device_info.name} at {device_info.address}:{device_info.port}")
 
-        # Get calibration (synchronous)
-        calibration = device.get_calibration()
+        async_pl_device = Device(host=device_info.address, port=device_info.port)
+        
+        # Get status to confirm connection and get stream URLs
+        # This will implicitly connect if the Device class handles it upon first API call.
+        status = await async_pl_device.get_status()
+        print(f"Connected to: {status.phone.device_name if status.phone else 'Unknown Device Name'}") # status.phone might be None
+
+        calibration = await async_pl_device.get_calibration()
         print("Calibration received.")
 
         gaze_mapper = GazeMapper(calibration)
 
-        # Add surface to GazeMapper
-        # The `marker_verts_screen_px` must match the IDs and positions of your AprilTag markers
         surface_definition = gaze_mapper.add_surface(
             marker_verts_px=marker_verts_screen_px,
             surface_size_px=screen_surface_size_px
@@ -176,8 +175,25 @@ async def run_main_application():
         udp_sender = AsyncUDPSender(host=UNITY_IP, port=UNITY_PORT)
         await udp_sender.connect()
 
-        # Start streaming loop
-        await stream_data_loop(device, gaze_mapper, surface_definition, udp_sender)
+        # Get streaming URLs from status
+        gaze_url = status.direct_gaze_url()
+        video_url = status.direct_scene_video_url()
+
+        if not gaze_url:
+            print("Could not get gaze streaming URL from device status.")
+            return
+        if not video_url:
+            print("Could not get scene video streaming URL from device status.")
+            return
+            
+        print(f"Gaze stream URL: {gaze_url}")
+        print(f"Video stream URL: {video_url}")
+
+        gaze_streamer = RTSPGazeStreamer(url=gaze_url)
+        video_streamer = RTSPVideoFrameStreamer(url=video_url)
+        matcher = DataMatcher(gaze_streamer=gaze_streamer, frame_streamer=video_streamer)
+
+        await stream_data_from_matcher(matcher, gaze_mapper, surface_definition, udp_sender)
 
     except KeyboardInterrupt:
         print("\nStreaming stopped by user.")
@@ -190,15 +206,15 @@ async def run_main_application():
     finally:
         if udp_sender:
             udp_sender.close()
-        if device:
-            print("Closing device connection...")
-            # device.close() is synchronous for simple.Device and handles its own internal async closing.
-            device.close()
+        if async_pl_device:
+            print("Closing device connection (async)...")
+            await async_pl_device.close()
+        print("Closing network discovery...")
+        await network.close() # Close the network discovery
         print("Application terminated.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(run_main_application())
     except KeyboardInterrupt:
-        # Handled in run_main_application, but in case interruption happens earlier.
         print("\nProgram interrupted.")
