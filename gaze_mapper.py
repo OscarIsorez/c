@@ -14,13 +14,14 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 screen_height = 1080
 screen_width = 1920
 N_MARKERS = 4
+MARKER_SIZE = 256
 
 # --- Marker Vertices (pixel coordinates in the camera image) ---
 marker_verts = {
-    0: [(0, 0), (128, 0), (128, 128), (0, 128)],  # Top-left
-    1: [(screen_width-128, 0), (screen_width, 0), (screen_width, 128), (screen_width-128, 128)],  # Top-right
-    2: [(0, screen_height-128), (128, screen_height-128), (128, screen_height), (0, screen_height)],  # Bottom-left
-    3: [(screen_width-128, screen_height-128), (screen_width, screen_height-128), (screen_width, screen_height), (screen_width-128, screen_height)],  # Bottom-right
+    0: [(0, 0), (MARKER_SIZE, 0), (MARKER_SIZE, MARKER_SIZE), (0, MARKER_SIZE)],  # Top-left
+    1: [(screen_width-MARKER_SIZE, 0), (screen_width, 0), (screen_width, MARKER_SIZE), (screen_width-MARKER_SIZE, MARKER_SIZE)],  # Top-right
+    2: [(0, screen_height-MARKER_SIZE), (MARKER_SIZE, screen_height-MARKER_SIZE), (MARKER_SIZE, screen_height), (0, screen_height)],  # Bottom-left
+    3: [(screen_width-MARKER_SIZE, screen_height-MARKER_SIZE), (screen_width, screen_height-MARKER_SIZE), (screen_width, screen_height), (screen_width-MARKER_SIZE, screen_height)],  # Bottom-right
 }
 
 
@@ -56,12 +57,12 @@ screen_width = 1920
 screen_height = 1080
 
 # Marker size in pixels
-marker_size = 128
+
 
 # Generate eight markers with different IDs
 marker_ids = list(range(N_MARKERS))
 markers = [marker_generator.generate_marker(marker_id=i) for i in marker_ids]
-marker_imgs = [Image.fromarray(m).resize((marker_size, marker_size), Image.NEAREST) for m in markers]
+marker_imgs = [Image.fromarray(m).resize((MARKER_SIZE, MARKER_SIZE), Image.NEAREST) for m in markers]
 
 def show_markers_thread():
     import tkinter as tk
@@ -74,7 +75,7 @@ def show_markers_thread():
     def show_marker(img, x, y):
         win = tk.Toplevel()
         win.overrideredirect(True)
-        win.geometry(f"{marker_size}x{marker_size}+{x}+{y}")
+        win.geometry(f"{MARKER_SIZE}x{MARKER_SIZE}+{x}+{y}")
         photo = ImageTk.PhotoImage(img)
         label = tk.Label(win, image=photo)
         label.image = photo
@@ -84,9 +85,9 @@ def show_markers_thread():
 
     # Corners
     show_marker(marker_imgs[0], 0, 0)  # Top-left
-    show_marker(marker_imgs[1], screen_width - marker_size, 0)  # Top-right
-    show_marker(marker_imgs[2], 0, screen_height - marker_size)  # Bottom-left
-    show_marker(marker_imgs[3], screen_width - marker_size, screen_height - marker_size)  # Bottom-right
+    show_marker(marker_imgs[1], screen_width - MARKER_SIZE, 0)  # Top-right
+    show_marker(marker_imgs[2], 0, screen_height - MARKER_SIZE)  # Bottom-left
+    show_marker(marker_imgs[3], screen_width - MARKER_SIZE, screen_height - MARKER_SIZE)  # Bottom-right
     # Edge centers
     # show_marker(marker_imgs[4], screen_width//2 - marker_size//2, 0)  # Top-center
     # show_marker(marker_imgs[5], screen_width//2 - marker_size//2, screen_height - marker_size)  # Bottom-center
